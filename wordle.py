@@ -12,7 +12,7 @@ ALL_LETTERS = 'abcdefghijklmnopqrstuvwxyz'
 
 class WordleSolver:
 
-    def __init__(self, wordlen: int = 5, dictfile: str = './words.txt', allow_dup_letters: bool = False):
+    def __init__(self, wordlen: int = 5, dictfile: str = './words.txt', allow_dup_letters: bool = True):
         self.wordlen = wordlen
         self._load_words(dictfile, allow_dup_letters)
         self.reset()
@@ -216,8 +216,15 @@ def run_interactive():
         if len(solver.potential_solutions) == 1:
             print('That\'s the last possible solution in this dictionary.')
             return
+        print('Enter feedback string using letters C, L, X.  Or, to specify the word to guess: <word> <feedback>')
         res = input('Feedback (C/L/X = Correct position/Wrong position/Letter unused): ')
-        solver.update(guess, res)
+        # If input in form <word> <result>, then submit that word as the guess with the given result
+        if re.fullmatch(r'[a-z]{' + str(solver.wordlen) + '} [CXL]{' + str(solver.wordlen) + '}', res):
+            parts = res.split(' ')
+            print(f'Guessed {parts[0]} with result {parts[1]}')
+            solver.update(parts[0], parts[1])
+        else:
+            solver.update(guess, res)
         if solver.solved:
             return
 
