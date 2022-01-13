@@ -9,12 +9,13 @@ import random
 import argparse
 from collections.abc import Sequence, Mapping
 from typing import Optional
+from array import array
 
 ALL_LETTERS = 'abcdefghijklmnopqrstuvwxyz'
 
 class WordleSolver:
 
-    def __init__(self, wordlen: int = 5, dictfile_solutions: str = './words_wordle_solutions.txt', dictfile_guesses: Optional[str] = './words_wordle.txt', allow_dup_letters: bool = True, hard_mode: bool = False):
+    def __init__(self, wordlen: int = 5, dictfile_solutions: str = './words_wordle_solutions.txt', dictfile_guesses: Optional[str] = './words_wordle.txt', allow_dup_letters: bool = True, hard_mode: bool = False, const_first_guess: Optional[str] = 'roate'):
         self.wordlen = wordlen
         self.hard_mode = hard_mode
         self.all_words = self._load_words(dictfile_solutions, allow_dup_letters)
@@ -22,6 +23,8 @@ class WordleSolver:
             self.all_guess_words = self.all_words.copy()
         else:
             self.all_guess_words = self._load_words(dictfile_guesses, allow_dup_letters)
+        self._fast_word_result_buf = array('b', [ 0 for i in range(256) ])
+        self.const_first_guess = const_first_guess
         self.reset()
 
     def _load_words(self, dictfile: str, allow_dup_letters: bool) -> None:
@@ -88,6 +91,33 @@ class WordleSolver:
         self._update_potential_solutions()
         # Flag indicating if target has been solved
         self.solved = False
+        # Queue of constant first words to guess
+        self.first_word_queue = [ self.const_first_guess ] if self.const_first_guess and self.const_first_guess in self.all_guess_words else []
+
+    def _fast_word_result(self, guess: str, target: str):
+        """Faster word evaluation for internal use"""
+        retval = 0
+        target_lcounts = self._fast_word_result_buf
+        for i in range(self.wordlen):
+            target_lcounts[ord(target[i])] += 1
+        placeval = 1
+        for i in range(self.wordlen):
+            if guess[i] == target[i]:
+                retval += placeval * 2
+                target_lcounts[ord(target[i])] -= 1
+            placeval *= 3
+        placeval = 1
+        for i in range(self.wordlen):
+            g = guess[i]
+            t = target[i]
+            ordg = ord(g)
+            if g != t and target_lcounts[ordg] > 0:
+                retval += placeval
+                target_lcounts[ordg] -= 1
+            placeval *= 3
+        for i in range(self.wordlen):
+            target_lcounts[ord(target[i])] = 0
+        return retval
 
     def update(self, guessed_word: str, result: str) -> None:
         """Updates the state with the result of a guess.
@@ -160,11 +190,6 @@ class WordleSolver:
             self.solved = True
             self.potential_solutions = set([ guessed_word ])
 
-        #print('positions', self.positions)
-        #print('letter_counts', self.letter_counts)
-        #if len(self.potential_solutions) < 50:
-        #    print('potentials', self.potential_solutions)
-
     def _update_potential_solutions(self) -> None:
         """Recalculates self.potential_solutions according to current state."""
         # Filter the set of potential solutions according to which letters are allowed in which positions.
@@ -198,6 +223,10 @@ class WordleSolver:
         #print(f'End with {len(self.potential_solutions)}')
 
     def get_guess(self) -> str:
+        # Handle constant first word(s)
+        if len(self.first_word_queue):
+            return self.first_word_queue.pop(0)
+
         if len(self.potential_solutions) == 0:
             # There are no possible solutions
             raise Exception('Answer unknown')
@@ -206,71 +235,33 @@ class WordleSolver:
             # there are 2 left, and we just need to try each one.  Either way, return the first.
             return list(self.potential_solutions)[0]
 
-        # Evaluate each potential word to guess based on what information it could yield.
-        # Letter count info:
-        # - For a given letter, if its count lbound and ubound are the same, no additional count info can be discovered.
-        # - For a given letter, guessing a count <= the lbound will yield no additional count info.
-        # - For a given letter, guessing a count > the lbound may yield info on the ubound.
-        #   - If ubound-lbound>1 this count info may segment the potential solutions into more than 2 components.
-        # Letter position info:
-        # - Trying a letter in a position that we already know the letter is in (green tile) yields no additional pos information.
-        # - Trying a letter for which we already know all its positions (including with a ubound of 0) yields no additional information.
-        # - Trying a letter in a position it cannot be yields no additional pos information.
-        # - Trying a letter in a position it may or may not be in will provide boolean information on that position.
-
-        # For each letter, determine how well that letter's presence or absence (or count) segments the remaining potential_solutions.
-        # The result is a mapping from a letter and letter count to the count of potential solutions that have at least that many of the letter.
-        letter_count_partitions: dict[tuple[str, int], float] = {}
-        for word in self.potential_solutions:
-            word_lcounts = WordleSolver._get_letter_counts(word, True)
-            for letter, lcount in word_lcounts.items():
-                for i in range(lcount + 1):
-                    letter_count_partitions[(letter, i)] = letter_count_partitions.get((letter, i), 0) + 1
-        # Convert each of the counts in letter_count_partitions to a fraction
-        for key in letter_count_partitions:
-            letter_count_partitions[key] /= len(self.potential_solutions)
-
-        # Count how many times each letter occurs in each position in the potential solutions.
-        # This is a mapping from (letter, position) -> count (later turned into a fraction)
-        letter_position_partitions: dict[tuple[str, int], float] = {}
-        for word in self.potential_solutions:
-            for i, letter in enumerate(word):
-                letter_position_partitions[(letter, i)] = letter_position_partitions.get((letter, i), 0) + 1
-        # Convert each of the counts into a fraction
-        for key in letter_position_partitions:
-            letter_position_partitions[key] /= len(self.potential_solutions)
-
-        # For each piece of information that might be gained, determine how well it segments the remaining potential solution set.
-        # Combine these to generate a score for each word.
+        # Determine which guess word best segments the remaining solution set.
         best_word = None
         best_score = -1
 
         # hard mode means only potential solutions can be used as guesses
         potential_guesses = self.potential_solutions if self.hard_mode else self.all_guess_words
 
+        # NOTE: If too slow, this can be sped up by restricting the potential_guesses and/or
+        # potential_solutions iterations to a random sample.  This limits the iterations of this
+        # O(nm) loop but does slightly decrease optimality.
         for word in potential_guesses:
-            word_score = 0
-            # Determine what letter count info may be gained
-            word_lcounts = WordleSolver._get_letter_counts(word, False)
-            for letter, (lbound, ubound) in self.letter_counts.items():
-                lcount = word_lcounts.get(letter, 0)
-                if lcount > lbound:
-                    # Some letter count info may be gained.  Determine how well each additional instance of the letter partitions the potential solutions.
-                    for i in range(lcount):
-                        frac = letter_count_partitions.get((letter, i + 1), 0)
-                        # The closer to 50%, the more information is gained.  If this count of this letter occurs in 0% or 100% of potential solutions, no info is gained.
-                        word_score += 0.5 - abs(frac - 0.5)
-            # Determine what letter position info may be gained
-            for i, (letter, allowed_letters) in enumerate(zip(word, self.positions)):
-                if letter in allowed_letters and len(allowed_letters) > 1:
-                    # Some position info may be gained.  Determine how well this letter being in this position partitions the potential solutions.
-                    frac = letter_position_partitions.get((letter, i), 0)
-                    word_score += 0.5 - abs(frac - 0.5)
+            # Assuming we use this word as our guess, determine how the potential solutions will be grouped based on the obtained info.
+            # For each potential solution, get the result string that would result from trying it, and count how many of each string in each group.
+            solution_group_counts: dict[str, int] = {}
+            for potsol in self.potential_solutions:
+                resstr = self._fast_word_result(word, potsol)
+                solution_group_counts[resstr] = solution_group_counts.get(resstr, 0) + 1
+            # We want to optimize for smallest average expected group size.
+            # The probability of the solution being in a given group is dependent on the group's size, so
+            # the average expected group size is the weighted average of group sizes, weighted by group size.
+            avg_expected_group_size = sum(( s * s for s in solution_group_counts.values() )) / sum(( s for s in solution_group_counts.values() ))
+            word_score = avg_expected_group_size
             # Add a small boost if this word is one of the possible solutions
             if word in self.potential_solutions:
-                word_score += 0.01
-            # Maximize the score
-            if word_score > best_score:
+                word_score -= 0.01
+            # Minimize the score
+            if word_score < best_score or best_score == -1:
                 best_score = word_score
                 best_word = word
 
