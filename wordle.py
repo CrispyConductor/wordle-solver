@@ -8,15 +8,20 @@ import re
 import random
 import argparse
 from collections.abc import Sequence, Mapping
+from typing import Optional
 
 ALL_LETTERS = 'abcdefghijklmnopqrstuvwxyz'
 
 class WordleSolver:
 
-    def __init__(self, wordlen: int = 5, dictfile: str = './words.txt', allow_dup_letters: bool = True, hard_mode: bool = False):
+    def __init__(self, wordlen: int = 5, dictfile_solutions: str = './words_wordle_solutions.txt', dictfile_guesses: Optional[str] = './words_wordle.txt', allow_dup_letters: bool = True, hard_mode: bool = False):
         self.wordlen = wordlen
         self.hard_mode = hard_mode
-        self._load_words(dictfile, allow_dup_letters)
+        self.all_words = self._load_words(dictfile_solutions, allow_dup_letters)
+        if dictfile_guesses == None:
+            self.all_guess_words = self.all_words.copy()
+        else:
+            self.all_guess_words = self._load_words(dictfile_guesses, allow_dup_letters)
         self.reset()
 
     def _load_words(self, dictfile: str, allow_dup_letters: bool) -> None:
@@ -37,7 +42,7 @@ class WordleSolver:
             return False
         if not allow_dup_letters:
             all_words = [ word for word in all_words if not has_dup_letters(word) ]
-        self.all_words = all_words
+        return all_words
 
     @staticmethod
     def _get_letter_counts(word: str, all_letters: bool = False) -> dict[str, int]:
@@ -241,7 +246,7 @@ class WordleSolver:
         best_score = -1
 
         # hard mode means only potential solutions can be used as guesses
-        potential_guesses = self.potential_solutions if self.hard_mode else self.all_words
+        potential_guesses = self.potential_solutions if self.hard_mode else self.all_guess_words
 
         for word in potential_guesses:
             word_score = 0
@@ -321,6 +326,11 @@ def run_interactive(solver):
                 solver.all_words.remove(guess)
             except ValueError:
                 pass
+            try:
+                solver.all_guess_words.remove(guess)
+            except ValueError:
+                pass
+
             continue
         else:
             solver.update(guess, res)
@@ -354,7 +364,7 @@ def run_eval(solver):
     print('Failed words:', failed_words)
     print('Average guesses:', totalguesses / nwords)
     nsuccess = nwords - len(failed_words)
-    print(f'Successful words: {nsuccess}/{nwords} ({nsuccess/nwords}%)')
+    print(f'Successful words: {nsuccess}/{nwords} ({nsuccess/nwords*100}%)')
 
 
 if __name__ == '__main__':
