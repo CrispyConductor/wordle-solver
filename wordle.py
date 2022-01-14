@@ -7,7 +7,7 @@ This requires a newline-separate file with dictionary words in ./words.txt.
 import re
 import random
 import argparse
-from collections.abc import Sequence, Mapping
+from collections.abc import Sequence, Mapping, Iterable
 from typing import Optional
 from array import array
 
@@ -18,9 +18,9 @@ class WordleSolver:
     def __init__(self, wordlen: int = 5, dictfile_solutions: str = './words_wordle_solutions.txt', dictfile_guesses: Optional[str] = './words_wordle.txt', allow_dup_letters: bool = True, hard_mode: bool = False, const_first_guess: Optional[str] = 'roate'):
         self.wordlen = wordlen
         self.hard_mode = hard_mode
-        self.all_words = self._load_words(dictfile_solutions, allow_dup_letters)
+        self.all_solution_words = self._load_words(dictfile_solutions, allow_dup_letters)
         if dictfile_guesses == None:
-            self.all_guess_words = self.all_words.copy()
+            self.all_guess_words = self.all_solution_words.copy()
         else:
             self.all_guess_words = self._load_words(dictfile_guesses, allow_dup_letters)
         self._fast_word_result_buf = array('b', [ 0 for i in range(256) ])
@@ -82,17 +82,18 @@ class WordleSolver:
         for i in range(self.wordlen):
             self.positions.append(set(ALL_LETTERS))
         # Map from each letter to a tuple of the upper and lower bound (inclusive) of how many of that letter may be present
-        self.letter_counts = WordleSolver._get_letter_count_ranges_of_words(self.all_words)
+        self.letter_counts = WordleSolver._get_letter_count_ranges_of_words(self.all_solution_words)
         # Set of words that have been tried so far
         self.tried_words = set()
         self.tried_word_list = []
         # Set of words that might be possible solutions at this point
-        self.potential_solutions = set(self.all_words)
-        self._update_potential_solutions()
+        self.potential_solutions = set(self.all_solution_words)
         # Flag indicating if target has been solved
         self.solved = False
         # Queue of constant first words to guess
         self.first_word_queue = [ self.const_first_guess ] if self.const_first_guess and self.const_first_guess in self.all_guess_words else []
+        # The set of words that can be guessed is reset each time because it is modified in hard more
+        self.potential_guesses = set(self.all_guess_words)
 
     def _fast_word_result(self, guess: str, target: str):
         """Faster word evaluation for internal use"""
@@ -181,7 +182,10 @@ class WordleSolver:
         self.tried_words.add(guessed_word)
         self.tried_word_list.append(guessed_word)
         # Update the list of valid solutions at this point
-        self._update_potential_solutions()
+        self._filter_words_by_known_info(self.potential_solutions)
+        # If in hard mode, also filter potential guesses by known info
+        if self.hard_mode:
+            self._filter_words_by_known_info(self.potential_guesses)
         # After narrowing down potential solutions, letter count ranges may be narrowed as well
         self.letter_counts = WordleSolver._get_letter_count_ranges_of_words(list(self.potential_solutions))
         # Check if the guessed word was the correct solution
@@ -190,8 +194,8 @@ class WordleSolver:
             self.solved = True
             self.potential_solutions = set([ guessed_word ])
 
-    def _update_potential_solutions(self) -> None:
-        """Recalculates self.potential_solutions according to current state."""
+    def _filter_words_by_known_info(self, words: set[str]) -> None:
+        """Removes words from the set that do not fit known information."""
         # Filter the set of potential solutions according to which letters are allowed in which positions.
         # Do this by constructing a regex from self.positions
         regex_str = ''.join([
@@ -201,26 +205,15 @@ class WordleSolver:
         rx = re.compile(regex_str)
         # Filter potential_solutions by this regex, and also make sure letter counts are in bounds for each
         def word_within_bounds(word):
-            #print('word_within_bounds ' + word)
             lcounts = WordleSolver._get_letter_counts(word, True)
             for letter, lcount in lcounts.items():
                 lbound, ubound = self.letter_counts[letter]
-                #print(f'  letter {letter} lbound {lbound} lcount {lcount} ubound {ubound}')
                 if not (lbound <= lcount <= ubound):
-                    #print('  return false')
                     return False
             return True
-        #print(regex_str)
-        #print('update_potential_solutions start with ' + str(len(self.potential_solutions)))
-        self.potential_solutions = set((
-            word
-            for word in self.potential_solutions
-            if
-                rx.fullmatch(word) and
-                word not in self.tried_words and
-                word_within_bounds(word)
-        ))
-        #print(f'End with {len(self.potential_solutions)}')
+        for word in list(words):
+            if not (rx.fullmatch(word) and word not in self.tried_words and word_within_bounds(word)):
+                words.discard(word)
 
     def get_guess(self) -> str:
         # Handle constant first word(s)
@@ -239,13 +232,10 @@ class WordleSolver:
         best_word = None
         best_score = -1
 
-        # hard mode means only potential solutions can be used as guesses
-        potential_guesses = self.potential_solutions if self.hard_mode else self.all_guess_words
-
         # NOTE: If too slow, this can be sped up by restricting the potential_guesses and/or
         # potential_solutions iterations to a random sample.  This limits the iterations of this
         # O(nm) loop but does slightly decrease optimality.
-        for word in potential_guesses:
+        for word in self.potential_guesses:
             # Assuming we use this word as our guess, determine how the potential solutions will be grouped based on the obtained info.
             # For each potential solution, get the result string that would result from trying it, and count how many of each string in each group.
             solution_group_counts: dict[str, int] = {}
@@ -314,7 +304,7 @@ def run_interactive(solver):
             print('Blacklisting word ' + guess)
             solver.potential_solutions.discard(guess)
             try:
-                solver.all_words.remove(guess)
+                solver.all_solution_words.remove(guess)
             except ValueError:
                 pass
             try:
@@ -335,7 +325,7 @@ def run_target(solver, target):
     print(target)
 
 def run_eval(solver):
-    wlist = solver.all_words.copy()
+    wlist = solver.all_solution_words.copy()
     random.shuffle(wlist)
     histogram = {}
     failed_words = []
